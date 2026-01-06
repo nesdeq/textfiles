@@ -1,0 +1,18 @@
+[package]
+name = "textfiles-browser"
+version = "0.1.0"
+edition = "2024"
+description = "A nostalgic terminal browser for textfiles.com"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+reqwest = { version = "0.12", features = ["blocking"] }
+scraper = "0.22"
+anyhow = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
