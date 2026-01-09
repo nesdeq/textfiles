@@ -3,6 +3,7 @@ name = "textfiles-browser"
 version = "0.1.0"
 edition = "2024"
 description = "A nostalgic terminal browser for textfiles.com"
+license = "MIT"
 
 [dependencies]
 ratatui = "0.29"
