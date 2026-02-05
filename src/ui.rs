@@ -8,7 +8,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols::border,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
 
@@ -17,6 +17,38 @@ const GREEN_BRIGHT: Color = Color::Rgb(57, 255, 20);
 const GREEN_NORMAL: Color = Color::Rgb(0, 200, 0);
 const GREEN_DIM: Color = Color::Rgb(0, 140, 0);
 const BLACK: Color = Color::Rgb(0, 10, 0);
+
+fn wrap_line(line: &str, width: usize) -> Vec<String> {
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() <= width {
+        return vec![line.to_string()];
+    }
+    chars.chunks(width)
+        .map(|chunk| chunk.iter().collect())
+        .collect()
+}
+
+fn marquee(text: &str, width: usize, offset: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    if len <= width {
+        return text.to_string();
+    }
+    // Add padding for smooth loop: "text   text   "
+    let padded: Vec<char> = chars.iter()
+        .chain("   ".chars().collect::<Vec<_>>().iter())
+        .cloned()
+        .collect();
+    let padded_len = padded.len();
+    let start = offset % padded_len;
+
+    (0..width)
+        .map(|i| padded[(start + i) % padded_len])
+        .collect()
+}
 
 const HEADER: &str = r#"
  ▄▄▄█████▓▓█████ ▒██   ██▒▄▄▄█████▓  █████▒██▓ ██▓    ▓█████   ██████
@@ -43,9 +75,12 @@ pub struct App {
     pub list_state: ListState,
     pub title: String,
     pub text_lines: Vec<String>,
+    pub wrapped_lines: Vec<String>,
     pub scroll: usize,
+    pub view_width: u16,
     pub error: Option<String>,
     pub tick: u64,
+    pub marquee_offset: usize,
 }
 
 impl App {
@@ -57,9 +92,12 @@ impl App {
             list_state: ListState::default(),
             title: String::new(),
             text_lines: Vec::new(),
+            wrapped_lines: Vec::new(),
             scroll: 0,
+            view_width: 80,
             error: None,
             tick: 0,
+            marquee_offset: 0,
         }
     }
 
@@ -69,7 +107,10 @@ impl App {
 
     pub fn navigate_to(&mut self, url: &str) -> Result<()> {
         match self.browser.navigate(url) {
-            Ok(page) => self.apply_page(page),
+            Ok(page) => {
+                self.marquee_offset = 0;
+                self.apply_page(page);
+            }
             Err(e) => self.error = Some(e.to_string()),
         }
         Ok(())
@@ -85,6 +126,7 @@ impl App {
             }
             Content::TextFile(text) => {
                 self.text_lines = text.lines().map(String::from).collect();
+                self.rewrap_lines();
                 self.scroll = 0;
                 self.mode = Mode::Viewer;
             }
@@ -126,34 +168,53 @@ impl App {
     pub fn next(&mut self) {
         if self.entries.is_empty() { return; }
         let i = self.list_state.selected().map(|i| (i + 1).min(self.entries.len() - 1)).unwrap_or(0);
+        if self.list_state.selected() != Some(i) {
+            self.marquee_offset = 0;
+        }
         self.list_state.select(Some(i));
     }
 
     pub fn previous(&mut self) {
         let i = self.list_state.selected().map(|i| i.saturating_sub(1)).unwrap_or(0);
+        if self.list_state.selected() != Some(i) {
+            self.marquee_offset = 0;
+        }
         self.list_state.select(Some(i));
     }
 
     pub fn page_down(&mut self) {
         if self.entries.is_empty() { return; }
         let i = self.list_state.selected().map(|i| (i + 20).min(self.entries.len() - 1)).unwrap_or(0);
+        if self.list_state.selected() != Some(i) {
+            self.marquee_offset = 0;
+        }
         self.list_state.select(Some(i));
     }
 
     pub fn page_up(&mut self) {
         let i = self.list_state.selected().map(|i| i.saturating_sub(20)).unwrap_or(0);
+        if self.list_state.selected() != Some(i) {
+            self.marquee_offset = 0;
+        }
         self.list_state.select(Some(i));
     }
 
     pub fn home(&mut self) {
         if !self.entries.is_empty() {
+            if self.list_state.selected() != Some(0) {
+                self.marquee_offset = 0;
+            }
             self.list_state.select(Some(0));
         }
     }
 
     pub fn end(&mut self) {
         if !self.entries.is_empty() {
-            self.list_state.select(Some(self.entries.len() - 1));
+            let last = self.entries.len() - 1;
+            if self.list_state.selected() != Some(last) {
+                self.marquee_offset = 0;
+            }
+            self.list_state.select(Some(last));
         }
     }
 
@@ -161,20 +222,42 @@ impl App {
         self.scroll = self.scroll.saturating_sub(n);
     }
 
-    pub fn scroll_down(&mut self, n: usize) {
-        self.scroll = (self.scroll + n).min(self.text_lines.len().saturating_sub(1));
+    pub fn scroll_down(&mut self, n: usize, visible_height: usize) {
+        let max_scroll = self.wrapped_lines.len().saturating_sub(visible_height);
+        self.scroll = (self.scroll + n).min(max_scroll);
     }
 
     pub fn scroll_home(&mut self) {
         self.scroll = 0;
     }
 
-    pub fn scroll_end(&mut self) {
-        self.scroll = self.text_lines.len().saturating_sub(1);
+    pub fn scroll_end(&mut self, visible_height: usize) {
+        self.scroll = self.wrapped_lines.len().saturating_sub(visible_height);
+    }
+
+    pub fn rewrap_lines(&mut self) {
+        let width = self.view_width.saturating_sub(3) as usize; // borders + scrollbar
+        let width = width.max(40); // minimum sanity
+        self.wrapped_lines = self.text_lines.iter()
+            .flat_map(|line| wrap_line(line, width))
+            .collect();
+    }
+
+    pub fn update_view_width(&mut self, new_width: u16) {
+        if new_width != self.view_width {
+            self.view_width = new_width;
+            if self.mode == Mode::Viewer && !self.text_lines.is_empty() {
+                self.rewrap_lines();
+            }
+        }
     }
 
     pub fn tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
+        // Advance marquee every 4 ticks (~200ms at 50ms poll)
+        if self.tick % 4 == 0 {
+            self.marquee_offset = self.marquee_offset.wrapping_add(1);
+        }
     }
 }
 
@@ -214,6 +297,8 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_browser(frame: &mut Frame, area: Rect, app: &mut App) {
+    let content_width = area.width.saturating_sub(5) as usize; // borders + scrollbar + highlight
+
     let items: Vec<ListItem> = app.entries.iter().enumerate().map(|(i, e)| {
         let selected = app.list_state.selected() == Some(i);
         let icon = if e.is_dir { "<DIR>" } else { "     " };
@@ -229,15 +314,35 @@ fn draw_browser(frame: &mut Frame, area: Rect, app: &mut App) {
              Style::default().fg(GREEN_DIM))
         };
 
+        let name_part = format!("{} {}", icon, e.name);
+        let name_len = name_part.chars().count();
+
         let line = if e.description.is_empty() {
-            Line::from(vec![
-                Span::styled(format!("{} {}", icon, e.name), name_style),
-            ])
+            let truncated: String = name_part.chars().take(content_width).collect();
+            Line::from(vec![Span::styled(truncated, name_style)])
         } else {
-            Line::from(vec![
-                Span::styled(format!("{} {}", icon, e.name), name_style),
-                Span::styled(format!(" - {}", e.description), desc_style),
-            ])
+            let desc_prefix = " - ";
+            let remaining = content_width.saturating_sub(name_len).saturating_sub(desc_prefix.len());
+
+            if remaining > 4 {
+                let desc_display = if selected && e.description.chars().count() > remaining {
+                    // Marquee scroll for selected long descriptions
+                    marquee(&e.description, remaining, app.marquee_offset)
+                } else if e.description.chars().count() > remaining {
+                    // Truncate non-selected
+                    let trunc: String = e.description.chars().take(remaining.saturating_sub(2)).collect();
+                    format!("{}..", trunc)
+                } else {
+                    e.description.clone()
+                };
+                Line::from(vec![
+                    Span::styled(name_part, name_style),
+                    Span::styled(format!("{}{}", desc_prefix, desc_display), desc_style),
+                ])
+            } else {
+                let truncated: String = name_part.chars().take(content_width).collect();
+                Line::from(vec![Span::styled(truncated, name_style)])
+            }
         };
 
         ListItem::new(line)
@@ -269,13 +374,14 @@ fn draw_browser(frame: &mut Frame, area: Rect, app: &mut App) {
 
 fn draw_viewer(frame: &mut Frame, area: Rect, app: &App) {
     let height = area.height.saturating_sub(2) as usize;
-    let lines: Vec<Line> = app.text_lines.iter()
+
+    let lines: Vec<Line> = app.wrapped_lines.iter()
         .skip(app.scroll)
         .take(height)
         .map(|l| Line::from(Span::styled(l.as_str(), Style::default().fg(GREEN_NORMAL))))
         .collect();
 
-    let total = app.text_lines.len();
+    let total = app.wrapped_lines.len();
     let pct = if total > 0 { ((app.scroll + height).min(total) * 100) / total } else { 100 };
 
     let p = Paragraph::new(lines)
@@ -287,8 +393,7 @@ fn draw_viewer(frame: &mut Frame, area: Rect, app: &App) {
                 format!(" {} [{}%] ", app.title, pct),
                 Style::default().fg(GREEN_BRIGHT).add_modifier(Modifier::BOLD)
             ))
-            .style(Style::default().bg(BLACK)))
-        .wrap(Wrap { trim: false });
+            .style(Style::default().bg(BLACK)));
 
     let mut scrollbar_state = ScrollbarState::new(total).position(app.scroll);
 
@@ -303,12 +408,20 @@ fn draw_viewer(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     let mode = if app.mode == Mode::Browser { "BROWSE" } else { "VIEW" };
-    let back = if app.browser.can_go_back() { "←BACK " } else { "" };
-
-    let left = format!(" {} │ {}", mode, app.browser.current_url);
+    let back = if app.browser.can_go_back() { "<-BACK " } else { "" };
     let right = format!("{}q:quit ", back);
+
     let width = area.width as usize;
-    let pad = width.saturating_sub(left.len()).saturating_sub(right.len());
+    let prefix = format!(" {} | ", mode);
+    let right_len = right.chars().count();
+    let prefix_len = prefix.chars().count();
+    let url_max = width.saturating_sub(prefix_len).saturating_sub(right_len).saturating_sub(1);
+
+    let url = marquee(&app.browser.current_url, url_max, app.marquee_offset);
+
+    let left = format!("{}{}", prefix, url);
+    let left_len = left.chars().count();
+    let pad = width.saturating_sub(left_len).saturating_sub(right_len);
 
     let line = Line::from(vec![
         Span::styled(&left, Style::default().fg(GREEN_BRIGHT)),

@@ -38,6 +38,10 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut ui::A
     app.load_home()?;
 
     loop {
+        let size = terminal.size()?;
+        let visible_height = size.height.saturating_sub(16) as usize; // header(12) + status(2) + borders(2)
+        app.update_view_width(size.width);
+
         terminal.draw(|f| ui::draw(f, app))?;
 
         if event::poll(Duration::from_millis(50))? {
@@ -70,11 +74,11 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut ui::A
                     },
                     ui::Mode::Viewer => match key.code {
                         KeyCode::Up | KeyCode::Char('k') => app.scroll_up(1),
-                        KeyCode::Down | KeyCode::Char('j') => app.scroll_down(1),
+                        KeyCode::Down | KeyCode::Char('j') => app.scroll_down(1, visible_height),
                         KeyCode::PageUp | KeyCode::Char('b') => app.scroll_up(20),
-                        KeyCode::PageDown | KeyCode::Char(' ') => app.scroll_down(20),
+                        KeyCode::PageDown | KeyCode::Char(' ') => app.scroll_down(20, visible_height),
                         KeyCode::Home | KeyCode::Char('g') => app.scroll_home(),
-                        KeyCode::End | KeyCode::Char('G') => app.scroll_end(),
+                        KeyCode::End | KeyCode::Char('G') => app.scroll_end(visible_height),
                         KeyCode::Backspace | KeyCode::Left | KeyCode::Esc | KeyCode::Char('q') => { app.go_back()?; }
                         _ => {}
                     },
